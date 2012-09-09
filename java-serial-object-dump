@@ -1,0 +1,849 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+#
+# dump a serialised java object
+#
+# Work in progress
+#
+# See "Java Object Serialization Specification"
+# http://docs.oracle.com/javase/6/docs/platform/serialization/spec/protocol.html
+#
+
+package Blob;
+use warnings;
+use strict;
+#
+# A handler to consume a 'blob' of data and allow serial reading of that blob
+#
+
+sub new($) {
+        my ($class,$data) = @_;
+	my $self = {};
+        bless $self, $class;
+
+	$self->_data($data);
+	$self->{_pos} = 0;
+
+	return $self;
+}
+
+# Add data to the blob
+#
+sub _data($) {
+	my ($self,$data) = @_;
+	$self->{_data} = $data;
+}
+
+# Length of the data
+sub length {
+	my ($self) = @_;
+	return length($self->{_data});
+}
+
+# current offset
+sub pos {
+	my ($self) = @_;
+	return $self->{_pos};
+}
+
+sub eof {
+	my ($self) = @_;
+	return $self->pos() >= $self->length();
+}
+
+sub read($) {
+	my ($self,$length) = @_;
+	if ($length <1) {
+		die "cannot read blob with length <1";
+	}
+	if ($self->pos() + $length > $self->length()) {
+		warn "attempt to read past end of blob";
+		return undef;
+	}
+	my $substr = substr($self->{_data},$self->pos(),$length);
+	$self->{_pos}+=$length;
+	return $substr;
+}
+
+# "un" read the given number of bytes
+sub unread($) {
+	my ($self,$length) = @_;
+	if ($self->pos() - $length < 0) {
+		warn "attempt to unread past begining of blob";
+		$self->{_pos} = 0;
+		return undef;
+	}
+	$self->{_pos}-=$length;
+	$self->_note('unread',$length);
+	return undef;
+} 
+
+# note down the type and order that things get fetched
+sub _note($$) {
+	my ($self,$name,$val) = @_;
+	push @{$self->{_note}}, "$name => $val";
+}
+
+# generic getter
+sub _get {
+	my ($self,$name,$size,$unpack,$printf) = @_;
+	my $buf = $self->read($size);
+	if (!defined $buf) {
+		return undef;
+	}
+	my $val = unpack($unpack,$buf);
+	$self->_note($name,sprintf($printf,$val));
+	return $val;
+}
+
+sub uint8  { my $self = shift; $self->_get(shift || 'uint8', 1,'C','0x%02x'); }
+sub uint16 { my $self = shift; $self->_get(shift || 'uint16',2,'n','0x%04x'); }
+sub uint32 { my $self = shift; $self->_get(shift || 'uint32',4,'N','0x%08x'); }
+sub uint64 { my $self = shift; $self->_get(shift || 'uint64',8,'Q>','0x%016x'); }
+sub ch     { my $self = shift; $self->_get(shift || 'ch',    1,'A','%s'); }
+
+sub uint24 {
+	my $self = shift;
+	my $name = shift || 'uint24';
+	my $buf = $self->read(3);
+	my ($val1,$val2) = unpack("Cn",$buf);
+	my $val = ($val1<<16) | $val2;
+	$self->_note($name,sprintf('0x%06x',$val));
+	return $val;
+}
+
+sub string {
+	my $self = shift;
+	my $name = shift || 'string';
+	my $strlen = $self->uint16('strlen');
+	my $buf = $self->read($strlen);
+	$self->_note($name,$buf);
+	return $buf;
+}
+
+package main;
+use warnings;
+use strict;
+
+use FileHandle;
+
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Quotekeys = 0;
+
+my $fieldtype = {
+	B => 'byte',
+	C => 'char',
+	D => 'double',
+	F => 'float',
+	I => 'integer',
+	J => 'long',
+	S => 'short',
+	Z => 'boolean',
+	'[' => 'array',
+	L => 'object',
+};
+
+my $TC_NULL = 0x70;		# 112
+my $TC_REFERENCE = 0x71;	# 113
+my $TC_CLASSDESC = 0x72;	# 114
+my $TC_OBJECT = 0x73;		# 115
+my $TC_STRING = 0x74;		# 116
+my $TC_ARRAY = 0x75;		# 117
+my $TC_CLASS = 0x76;		# 118
+my $TC_BLOCKDATA = 0x77;	# 119
+my $TC_ENDBLOCKDATA = 0x78;	# 120
+my $TC_RESET = 0x79;		# 121
+my $TC_BLOCKDATALONG = 0x7a;	# 122
+my $TC_EXCEPTION = 0x7b;	# 123
+my $TC_LONGSTRING = 0x7b;	# 124
+my $TC_PROXYCLASSDESC = 0x7b;	# 125
+my $baseWireHandle = 0x7e0000;
+
+# global!
+my $db;
+my $blob;
+my $next_handle = $baseWireHandle;
+
+sub handle_get($) {
+	my ($handleraw) = @_;
+	my $handle = $handleraw - $baseWireHandle;
+	$handle = sprintf('%04i',$handle);
+
+	if (!defined $db->{handle}{$handle}) {
+		#$db->{handle}{$handle} = {};
+		$db->{handle}{$handle}{_handle} = $handle;
+	}
+
+	return $db->{handle}{$handle};
+}
+
+sub handle_new {
+	my $handleraw = get_newHandle();
+
+	my $data = handle_get($handleraw);
+	$data->{_handle_raw} = sprintf('0x%06x',$handleraw);
+
+	$blob->_note('HANDLE',$data->{_handle});
+	#my $handle = $handleraw - $baseWireHandle;
+	#$data->{_handle} = $handle;
+
+
+	return $data;
+}
+
+sub _check_type($$) {
+	my ($typenr,$typename) = @_;
+	my $type = $blob->uint8($typename);
+	if ($type != $typenr) {
+		die "type mismatch: want $typenr, got $type";
+	}
+}
+
+sub get_newHandle {
+	# newHandle: // The next number in sequence is assigned
+	#            // to the object being serialized or deserialized
+
+	return $next_handle++;
+}
+
+sub get_nullReference() {
+	# nullReference
+	#  TC_NULL
+
+	_check_type($TC_NULL,'TC_NULL');
+	return undef;
+}
+
+sub get_primitiveDesc {
+	# primitiveDesc:
+	#  prim_typecode fieldName
+
+	my $type = $blob->ch('primitiveDesc type');
+	my $fieldName = $blob->string('fieldName');
+	if ($fieldName =~ m/^_/) {
+		die "fieldName $fieldName is not supported with _";
+	}
+	return {name => $fieldName, type => $fieldtype->{$type}};
+}
+
+sub get_className1 {
+	# className1:
+	#  (String)object // String containing the field's type, in field descriptor format
+
+	my $type = $blob->uint8('className1 type');
+	$blob->unread(1);
+
+	if ($type == $TC_STRING || $type == $TC_REFERENCE) {
+		return get_object();
+	}
+	die "bad type";
+}
+
+sub class2object_type {
+	my ($rawclass) = @_;
+	my $type = substr($rawclass,0,1);
+
+	if ($type eq '[') {
+		my $array_type = substr($rawclass,1,1);
+		if ($array_type ne 'L' && length($rawclass)>2) {
+			warn "array class $rawclass unexpectedly long"
+		}
+		return $fieldtype->{$array_type};
+	}
+	if ($type eq 'L') {
+		if ($rawclass =~ m/^L([^;]+);/) {
+			return $1;
+		} else {
+			warn "looks like a nested object type"
+		}
+	}
+	return undef;
+}
+
+sub get_objectDesc {
+	# objectDesc:
+	#  obj_typecode fieldName className1
+
+	my $e = {};
+
+	my $type = $blob->ch('objectDesc type');
+	$e->{type}=$fieldtype->{$type};
+	my $fieldName = $blob->string('fieldName');
+	if ($fieldName =~ m/^_/) {
+		die "fieldName $fieldName is not supported with _";
+	}
+	$e->{name}= $fieldName;
+	$e->{rawclass}= get_className1();
+	my $rawclass = $e->{rawclass};
+
+	if ($type eq '[') {
+		if (substr($rawclass,0,1) ne '[') {
+			die "array class mismatch";
+		}
+		$e->{class} = class2object_type($rawclass);
+	}
+	if ($type eq 'L') {
+		if (substr($rawclass,0,1) ne 'L') {
+			die "object class mismatch";
+		}
+		$e->{class} = class2object_type($rawclass);
+	}
+
+	return $e;
+}
+
+sub get_fieldDesc {
+	# fieldDesc:
+	#  primitiveDesc
+	#  objectDesc
+
+	my $type = $blob->ch('fieldDesc type');
+	$blob->unread(1);
+	if ($type eq '[' or $type eq 'L') {
+		return get_objectDesc();
+	} else {
+		return get_primitiveDesc();
+	}
+}
+
+sub get_fields($) {
+	# fields:
+	#  (short)<count> fieldDesc[count]
+
+	my ($e) = @_;
+	my $count = $blob->uint16('field count');
+	for my $i (1..$count) {
+		push @{$e->{fields}}, get_fieldDesc();
+	}
+}
+
+sub get_endBlockData {
+	# endBlockData:
+	#  TC_ENDBLOCKDATA
+
+	_check_type($TC_ENDBLOCKDATA,'TC_ENDBLOCKDATA');
+	return undef;
+}
+
+sub get_classAnnotation() {
+	# classAnnotation:
+	#  endBlockData
+	#  contents endBlockData // contents written by annotateClass
+
+	my $type = $blob->uint8('classAnnotation type');
+	$blob->unread(1);
+
+	if ($type == $TC_ENDBLOCKDATA) {
+		return get_endBlockData();
+	} else {
+		...;
+	}
+}
+
+sub get_superClassDesc {
+	# superClassDesc:
+	#  classDesc
+
+	return get_classDesc();
+}
+
+sub get_classDescInfo($) {
+	# classDescInfo:
+	#  classDescFlags fields classAnnotation superClassDesc
+
+	my ($e) = @_;
+
+	$e->{_classDescFlags} = $blob->uint8('classDescFlags');
+	get_fields($e);
+	my $classAnnotation = get_classAnnotation();
+	if ($classAnnotation) {
+		$e->{_classAnnotation} = $classAnnotation;
+	}
+	my $superClassDesc = get_superClassDesc();
+	if ($superClassDesc) {
+		$e->{_superClassDesc} = get_superClassDesc();
+		# FIXME - probably need to update the classdata to get superclass data
+		...;
+	}
+}
+
+sub get_newClassDesc() {
+	# newClassDesc:
+	#  TC_CLASSDESC className serialVersionUID newHandle classDescInfo
+	#  TC_PROXYCLASSDESC newHandle proxyClassDescInfo
+
+	my $type = $blob->uint8('newClassDesc type');
+
+	if ($type == $TC_CLASSDESC) {
+		my $className = $blob->string('className');
+		my $serialVersionUID = $blob->uint64('serialVersionUID');
+		my $e = handle_new();
+		$e->{_handle_type} = "TC_CLASSDESC";
+		$e->{_className} = $className;
+		$e->{_serialVersionUID} = $serialVersionUID;
+		get_classDescInfo($e);
+		my $_type = class2object_type($className);
+		if ($_type) {
+			$e->{_type} = $_type;
+		}
+
+		return $e;
+	} elsif ($type == $TC_PROXYCLASSDESC) {
+		...;
+	}
+}
+
+sub get_prevObject {
+	# prevObject
+	#  TC_REFERENCE (int)handle
+
+	_check_type($TC_REFERENCE,'TC_REFERENCE');
+	my $handleraw = $blob->uint32('prevObject handle');
+	my $e = handle_get($handleraw);
+	if ($e->{_handle_type} eq 'TC_STRING') {
+		return $e->{value};
+	}
+	return $e;
+}
+
+sub get_classDesc() {
+	# classDesc:
+	#  newClassDesc
+	#  nullReference
+	#  (ClassDesc)prevObject // an object required to be of type ClassDesc
+
+	my $type = $blob->uint8('classDesc type');
+	$blob->unread(1);
+
+	if ($type == $TC_CLASSDESC || $type == $TC_PROXYCLASSDESC) {
+		return get_newClassDesc();
+	} elsif ($type == $TC_NULL) {
+		return get_nullReference();
+	} elsif ($type == $TC_REFERENCE) {
+		return get_prevObject();
+	} else {
+		die "Dont know classDesc $type";
+	}
+}
+
+sub get_value($) {
+	my ($type) = @_;
+
+	# FIXME - signed vs unsigned??
+
+	if ($type eq 'byte')    { return $blob->uint8('value'); }
+	if ($type eq 'char')    { return $blob->ch('value'); }
+	#D => 'double',
+	#F => 'float',
+	if ($type eq 'integer') { return $blob->uint32('value'); }
+	if ($type eq 'long')    { return $blob->uint64('value'); }
+	if ($type eq 'short')   { return $blob->uint16('value'); }
+	if ($type eq 'boolean') { return $blob->uint8('value'); }
+	if ($type eq 'array') {
+		return get_object(); # FIXME - could check type first
+	}
+	if ($type eq 'object') {
+		return get_object(); # FIXME - could check type first
+	}
+	
+	die "Dont know value type $type";
+}
+
+sub get_newObject {
+	# newObject:
+	#  TC_OBJECT classDesc newHandle classdata[] // data for each class
+
+	_check_type($TC_OBJECT,'TC_OBJECT');
+
+	my $classDesc = get_classDesc();
+	my $e = handle_new();
+	$e->{_handle_type} = 'TC_OBJECT';
+	$e->{_classDesc} = $classDesc;
+
+	# Read class data
+	if (!defined $e->{_classDesc}) {
+		die "stream error"
+	}
+	if ($e->{_classDesc}{_handle_type} ne 'TC_CLASSDESC') {
+		die "stream error"
+	}
+
+	$e->{_state}="classdata[]";
+	foreach (@{$classDesc->{fields}}) {
+		$e->{$_->{name}} = get_value($_->{type});
+	}
+	#$e->{values} = get_fields_values($e->{_classDesc});
+	delete $e->{_state};
+
+	return $e;
+}
+
+sub get_newArray {
+	# newArray:
+	#  TC_ARRAY classDesc newHandle (int)<size> values[size]
+
+	# See http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html#14152
+	# for naming details
+
+	# FIXME, need to get the first char of the name and expect "["
+	# the next char of the name specifies the daat type
+
+	_check_type($TC_ARRAY,'TC_ARRAY');
+
+	my $classDesc = get_classDesc();
+	my $e = handle_new();
+	$e->{_handle_type} = 'TC_ARRAY';
+	$e->{_classDesc} = $classDesc;
+
+	my $size = $blob->uint32('newArray size');
+	$e->{_size} = $size;
+
+	my $object_type = $classDesc->{_type};
+	if (!defined $object_type) {
+		die "array of undefined object type";
+	}
+
+	$e->{_state} = "values[size]";
+	for my $i (0..$size-1) {
+		@{$e->{array}}[$i] = get_value($object_type);
+		$blob->_note("ARRAY ELEMENT",$i);
+	}
+	delete $e->{_state};
+
+	return $e;
+}
+
+sub get_newString {
+	# newString:
+	#  TC_STRING newHandle (utf)
+	#  TC_LONGSTRING newHandle (long-utf)
+
+	my $type = $blob->uint8('object type');
+
+	if ($type == $TC_STRING) {
+		my $e = handle_new();
+		$e->{_handle_type} = 'TC_STRING';
+		$e->{value} = $blob->string('TC_STRING');
+		return $e->{value};
+	}
+	...;
+}
+
+sub get_object {
+	# object:
+	#  newObject
+	#  newClass
+	#  newArray
+	#  newString
+	#  newClassDesc
+	#  prevObject
+	#  nullReference
+	#  exception
+	#  TC_RESET
+
+	my $type = $blob->uint8('object type');
+	$blob->unread(1);
+
+	if ($type == $TC_NULL) {
+		my $e = {};
+		return get_nullReference();
+	}
+	if ($type == $TC_OBJECT) {
+		return get_newObject();
+	}
+	if ($type == $TC_CLASS) {
+		...;
+	}
+	if ($type == $TC_ARRAY) {
+		return get_newArray();
+	}
+	if ($type == $TC_STRING) {
+		return get_newString();
+	}
+	if ($type == $TC_CLASSDESC) {
+		return get_newClassDesc();
+	}
+	if ($type == $TC_REFERENCE) {
+		return get_prevObject();
+	}
+	if ($type == $TC_EXCEPTION) {
+		...;
+	}
+	if ($type == $TC_RESET) {
+		...;
+		# ?? $next_handle = 0x7e0000;
+	}
+
+	die "dont know content type $type";
+}
+
+sub get_blockdata {
+	...;
+}
+
+sub get_content {
+	# content:
+	#  object
+	#  blockdata
+
+	my $type = $blob->uint8('content type');
+	$blob->unread(1);
+	if ($type == $TC_BLOCKDATA || $type == $TC_BLOCKDATALONG) {
+		get_blockdata();
+	} else {
+		get_object();
+	}
+}
+
+sub get_contents {
+	# contents:
+	#  content
+	#  contents content
+
+	while(!$blob->eof()) {
+		get_content();
+	}
+}
+
+sub get_stream {
+	# stream:
+	#  magic version contents
+
+	# magic
+	if ($blob->uint16('magic') != 0xaced) {
+		die "Bad magic";
+	}
+
+	# version
+	my $version = $blob->uint16('version');
+	if ($version != 5) {
+		printf("version=0x%04x\n",$version);
+		die "Bad version";
+	}
+	$db->{packet}{version}=$version;
+
+	get_contents();
+}
+
+sub show_class($) {
+	my ($class) = @_;
+	if ($class->{_handle_type} ne 'TC_CLASSDESC') {
+		die "Not a class";
+	}
+
+	# FIXME - encoded class names
+
+	print "// handle ",$class->{_handle},"\n";
+	print "class ",$class->{_className}," {\n";
+	foreach (@{$class->{fields}}) {
+		my $type;
+		my $name;
+		if ($_->{type} eq 'array') {
+			$type = $_->{class};
+			$name = $_->{name}.'[]';
+			if ($type eq 'object') {
+				$type = $_->{rawclass}
+			}
+		} elsif ($_->{type} eq 'object') {
+			$type = $_->{class};
+			$name = $_->{name};
+		} else {
+			$type = $_->{type};
+			$name = $_->{name};
+		}
+		print "    ",$type,"\t",$name,";\n";
+	}
+	# TODO
+	print "}\n\n";
+}
+
+sub show_classes {
+	foreach (sort keys %{$db->{handle}}) {
+		my $class = $db->{handle}{$_};
+		if ($class->{_handle_type} eq 'TC_CLASSDESC') {
+			show_class($class);
+		}
+	}
+}
+
+sub show_array($$) {
+	my ($depth,$array) = @_;
+	if ($array->{_handle_type} ne 'TC_ARRAY') {
+		die "Not an array";
+	}
+	return if $array->{_seen};
+	print "array [ //",$array->{_handle},"\n";
+	print " "x($depth+1);
+	foreach (@{$array->{array}}) {
+		show_thing($depth+1,$_);
+	}
+	print "]\n";
+	print " "x($depth);
+	$array->{_seen}++;
+}
+
+sub show_object($$) {
+	my ($depth,$object) = @_;
+	if ($object->{_handle_type} ne 'TC_OBJECT') {
+		die "Not an object";
+	}
+	return if $object->{_seen};
+	print "object ",$object->{_classDesc}{_className}," { //",$object->{_handle},"\n";
+	print " "x($depth+1);
+	foreach (keys %{$object}) {
+		next if (m/^_/); # skip metadata
+		print $_," = ";
+		show_thing($depth+1,$object->{$_});
+	}
+	print "}\n";
+	print " "x($depth);
+	$object->{_seen}++;
+}
+
+sub show_thing($$) {
+	my ($depth,$thing) = @_;
+	if (!$thing) {
+		print "NULL\n";
+		print " "x$depth;
+	} elsif (!ref($thing)) {
+		print $thing,"\n";
+		print " "x$depth;
+	} elsif ($thing->{_handle_type} eq 'TC_OBJECT') {
+		show_object($depth,$thing);
+	} elsif ($thing->{_handle_type} eq 'TC_ARRAY') {
+		show_array($depth,$thing);
+	}
+}
+
+sub show_things {
+	foreach (sort keys %{$db->{handle}}) {
+		my $thing = $db->{handle}{$_};
+		show_thing(0,$thing);
+	}
+}
+
+# Attempt to sort the output so that items that have no dependancies get
+# output first - hopefully making the output cleaner
+#
+sub evil_sort_hack {
+        my ($hash) = @_;
+
+        my $keys = {};
+        my $types = {};
+        foreach (keys %{$hash}) {
+                my $type = ref($hash->{$_});
+                $types->{$type}++;
+                $keys->{$_}=$type;
+        }
+
+        # If there are no hash refs, we dont have any magic to do
+        if (!defined $types->{HASH}) {
+                my @sorted = sort keys %{$hash};
+                return \@sorted;
+        }
+
+	# detect outputing the inside of a handle
+	if (defined $hash->{_handle_raw}) {
+                my @sorted = sort keys %{$hash};
+                return \@sorted;
+        }
+
+        my @sorted;
+
+	# Dump simple stuff that are not hashes
+	#foreach (sort grep {ref($hash->{$_}) ne 'HASH'} keys %{$keys}) {
+	#	delete $keys->{$_};
+	#	push @sorted,$_;
+	#}
+
+	# strings have no dependancies, dump them first
+	foreach (sort keys %{$keys}) {
+		next if (ref($hash->{$_}) ne 'HASH');
+		next if (!defined $hash->{$_}{_handle_type});
+		next if ($hash->{$_}{_handle_type} ne 'TC_STRING');
+		delete $keys->{$_};
+		push @sorted,$_;
+	}
+
+	# class definitions come next
+	foreach (sort keys %{$keys}) {
+		next if (ref($hash->{$_}) ne 'HASH');
+		next if (!defined $hash->{$_}{_handle_type});
+		next if ($hash->{$_}{_handle_type} ne 'TC_CLASSDESC');
+		
+		delete $keys->{$_};
+		push @sorted,$_;
+	}
+
+	## objects with values that are all scalar have less dependencies
+	#foreach (sort keys %{$keys}) {
+	#	next if (ref($hash->{$_}) ne 'HASH');
+	#	next if (!defined $hash->{$_}{_handle_type});
+	#	next if ($hash->{$_}{_handle_type} ne 'TC_OBJECT');
+	#	my $bad = 0;
+	#	for my $value (values %{$hash->{$_}{values}}) {
+	#		if (ref($value) eq 'HASH') {
+	#			$bad = 1;
+	#			last;
+	#		}
+	#	}
+	#	next if ($bad);
+	#	
+	#	delete $keys->{$_};
+	#	push @sorted,$_;
+	#}
+
+        # dump all other remaining items
+        foreach (sort keys %{$keys}) {
+                delete $keys->{$_};
+                push @sorted,$_;
+        }
+
+        return \@sorted;
+}
+$Data::Dumper::Sortkeys = \&evil_sort_hack;
+
+sub read_length($) {
+	my ($self) = @_;
+	my $buf;
+	$self->read($buf,4);
+	return unpack('N',$buf);
+}
+
+use Carp;
+STDOUT->autoflush(1);
+$SIG{ __DIE__ } = sub { print Dumper($db); Carp::confess( @_ ) };
+
+my $fh = FileHandle->new($ARGV[0]);
+
+# get packet length
+my $length = read_length($fh);
+
+if ($length == 0x504f5354) {
+	# "POST" == 0x504f5354
+	# skip the HTTP header..
+	while(<$fh>) {
+		chomp; s/\r//g;
+		last if (m/^$/);
+	}
+	$length = read_length($fh);
+}
+$db->{packet}{length} = $length;
+
+# read in the packet
+$fh->read(my $buf,$db->{packet}{length});
+$db->{blob}{packet} = Blob->new($buf);
+$blob = $db->{blob}{packet};
+
+get_stream();
+
+show_classes();
+show_things();
+
+print Dumper($db);
+__END__
+
+
