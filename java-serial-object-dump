@@ -365,9 +365,8 @@ sub get_classDescInfo($) {
 	}
 	my $superClassDesc = get_superClassDesc();
 	if ($superClassDesc) {
-		$e->{_superClassDesc} = get_superClassDesc();
-		# FIXME - probably need to update the classdata to get superclass data
-		...;
+		$e->{_superClassDesc} = $superClassDesc;
+                unshift @{$e->{fields}}, @{$superClassDesc->{fields}};
 	}
 }
 
