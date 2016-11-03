@@ -1,0 +1,12 @@
+This tool was written to help debugging the data between two java
+applications.  A packet sniffer was inserted inline and TCP connection
+traces were taken of the traffic.  This was used to determine that the
+data was a Java "Remote Method Invocation" (RMI) call, transported over
+a HTTP POST.
+
+To use, invoke with the filename containing the TCP stream data.  All the
+class definitions and objects contained in the stream will be read and
+printed out, both as a pseudo java code and as a perl data::dumper (for
+debugging)
+
+
