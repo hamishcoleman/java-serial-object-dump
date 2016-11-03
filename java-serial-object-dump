@@ -58,7 +58,7 @@ sub read($) {
 		die "cannot read blob with length <1";
 	}
 	if ($self->pos() + $length > $self->length()) {
-		warn "attempt to read past end of blob";
+		warn "attempt to read past end of blob (blob len=".$self->length().")";
 		return undef;
 	}
 	my $substr = substr($self->{_data},$self->pos(),$length);
@@ -118,7 +118,7 @@ sub string {
 	my $name = shift || 'string';
 	my $strlen = $self->uint16('strlen');
 	my $buf = $self->read($strlen);
-	$self->_note($name,$buf);
+	$self->_note((caller(1))[3].' '.$name,$buf);
 	return $buf;
 }
 
@@ -181,12 +181,13 @@ sub handle_get($) {
 }
 
 sub handle_new {
+        my $note = shift;
 	my $handleraw = get_newHandle();
 
 	my $data = handle_get($handleraw);
 	$data->{_handle_raw} = sprintf('0x%06x',$handleraw);
 
-	$blob->_note('HANDLE',$data->{_handle});
+	$blob->_note($note.' HANDLE',$data->{_handle});
 	#my $handle = $handleraw - $baseWireHandle;
 	#$data->{_handle} = $handle;
 
@@ -195,8 +196,8 @@ sub handle_new {
 }
 
 sub _check_type($$) {
-	my ($typenr,$typename) = @_;
-	my $type = $blob->uint8($typename);
+	my ($typenr,$name) = @_;
+	my $type = $blob->uint8((caller(1))[3].' '.$name);
 	if ($type != $typenr) {
 		die "type mismatch: want $typenr, got $type";
 	}
@@ -221,7 +222,7 @@ sub get_primitiveDesc {
 	# primitiveDesc:
 	#  prim_typecode fieldName
 
-	my $type = $blob->ch('primitiveDesc type');
+	my $type = $blob->ch((caller(0))[3].' type');
 	my $fieldName = $blob->string('fieldName');
 	if ($fieldName =~ m/^_/) {
 		die "fieldName $fieldName is not supported with _";
@@ -233,7 +234,7 @@ sub get_className1 {
 	# className1:
 	#  (String)object // String containing the field's type, in field descriptor format
 
-	my $type = $blob->uint8('className1 type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 	$blob->unread(1);
 
 	if ($type == $TC_STRING || $type == $TC_REFERENCE) {
@@ -269,7 +270,7 @@ sub get_objectDesc {
 
 	my $e = {};
 
-	my $type = $blob->ch('objectDesc type');
+	my $type = $blob->ch((caller(0))[3].' type');
 	$e->{type}=$fieldtype->{$type};
 	my $fieldName = $blob->string('fieldName');
 	if ($fieldName =~ m/^_/) {
@@ -300,7 +301,7 @@ sub get_fieldDesc {
 	#  primitiveDesc
 	#  objectDesc
 
-	my $type = $blob->ch('fieldDesc type');
+	my $type = $blob->ch((caller(0))[3].' type');
 	$blob->unread(1);
 	if ($type eq '[' or $type eq 'L') {
 		return get_objectDesc();
@@ -314,7 +315,7 @@ sub get_fields($) {
 	#  (short)<count> fieldDesc[count]
 
 	my ($e) = @_;
-	my $count = $blob->uint16('field count');
+	my $count = $blob->uint16((caller(0))[3].' count');
 	for my $i (1..$count) {
 		push @{$e->{fields}}, get_fieldDesc();
 	}
@@ -333,7 +334,7 @@ sub get_classAnnotation() {
 	#  endBlockData
 	#  contents endBlockData // contents written by annotateClass
 
-	my $type = $blob->uint8('classAnnotation type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 	$blob->unread(1);
 
 	if ($type == $TC_ENDBLOCKDATA) {
@@ -356,7 +357,7 @@ sub get_classDescInfo($) {
 
 	my ($e) = @_;
 
-	$e->{_classDescFlags} = $blob->uint8('classDescFlags');
+	$e->{_classDescFlags} = $blob->uint8((caller(0))[3].' classDescFlags');
 	get_fields($e);
 	my $classAnnotation = get_classAnnotation();
 	if ($classAnnotation) {
@@ -375,12 +376,12 @@ sub get_newClassDesc() {
 	#  TC_CLASSDESC className serialVersionUID newHandle classDescInfo
 	#  TC_PROXYCLASSDESC newHandle proxyClassDescInfo
 
-	my $type = $blob->uint8('newClassDesc type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 
 	if ($type == $TC_CLASSDESC) {
 		my $className = $blob->string('className');
-		my $serialVersionUID = $blob->uint64('serialVersionUID');
-		my $e = handle_new();
+		my $serialVersionUID = $blob->uint64((caller(0))[3].' serialVersionUID');
+		my $e = handle_new((caller(0))[3]);
 		$e->{_handle_type} = "TC_CLASSDESC";
 		$e->{_className} = $className;
 		$e->{_serialVersionUID} = $serialVersionUID;
@@ -415,7 +416,7 @@ sub get_classDesc() {
 	#  nullReference
 	#  (ClassDesc)prevObject // an object required to be of type ClassDesc
 
-	my $type = $blob->uint8('classDesc type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 	$blob->unread(1);
 
 	if ($type == $TC_CLASSDESC || $type == $TC_PROXYCLASSDESC) {
@@ -459,7 +460,7 @@ sub get_newObject {
 	_check_type($TC_OBJECT,'TC_OBJECT');
 
 	my $classDesc = get_classDesc();
-	my $e = handle_new();
+	my $e = handle_new((caller(0))[3]);
 	$e->{_handle_type} = 'TC_OBJECT';
 	$e->{_classDesc} = $classDesc;
 
@@ -494,7 +495,7 @@ sub get_newArray {
 	_check_type($TC_ARRAY,'TC_ARRAY');
 
 	my $classDesc = get_classDesc();
-	my $e = handle_new();
+	my $e = handle_new((caller(0))[3]);
 	$e->{_handle_type} = 'TC_ARRAY';
 	$e->{_classDesc} = $classDesc;
 
@@ -521,10 +522,10 @@ sub get_newString {
 	#  TC_STRING newHandle (utf)
 	#  TC_LONGSTRING newHandle (long-utf)
 
-	my $type = $blob->uint8('object type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 
 	if ($type == $TC_STRING) {
-		my $e = handle_new();
+		my $e = handle_new((caller(0))[3]);
 		$e->{_handle_type} = 'TC_STRING';
 		$e->{value} = $blob->string('TC_STRING');
 		return $e->{value};
@@ -544,7 +545,7 @@ sub get_object {
 	#  exception
 	#  TC_RESET
 
-	my $type = $blob->uint8('object type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 	$blob->unread(1);
 
 	if ($type == $TC_NULL) {
@@ -589,7 +590,7 @@ sub get_content {
 	#  object
 	#  blockdata
 
-	my $type = $blob->uint8('content type');
+	my $type = $blob->uint8((caller(0))[3].' type');
 	$blob->unread(1);
 	if ($type == $TC_BLOCKDATA || $type == $TC_BLOCKDATALONG) {
 		get_blockdata();
@@ -613,12 +614,12 @@ sub get_stream {
 	#  magic version contents
 
 	# magic
-	if ($blob->uint16('magic') != 0xaced) {
+	if ($blob->uint16((caller(0))[3].' magic') != 0xaced) {
 		die "Bad magic";
 	}
 
 	# version
-	my $version = $blob->uint16('version');
+	my $version = $blob->uint16((caller(0))[3].' version');
 	if ($version != 5) {
 		printf("version=0x%04x\n",$version);
 		die "Bad version";
