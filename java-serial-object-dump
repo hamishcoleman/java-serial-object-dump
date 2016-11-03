@@ -366,7 +366,6 @@ sub get_classDescInfo($) {
 	my $superClassDesc = get_superClassDesc();
 	if ($superClassDesc) {
 		$e->{_superClassDesc} = $superClassDesc;
-                unshift @{$e->{fields}}, @{$superClassDesc->{fields}};
 	}
 }
 
@@ -452,6 +451,18 @@ sub get_value($) {
 	die "Dont know value type $type";
 }
 
+sub get_fields_values {
+    my $classDesc = shift;
+    my $e = shift;
+
+    if ($classDesc->{_superClassDesc}) {
+        get_fields_values($classDesc->{_superClassDesc},$e);
+    }
+    foreach (@{$classDesc->{fields}}) {
+        $e->{$_->{name}} = get_value($_->{type});
+    }
+}
+
 sub get_newObject {
 	# newObject:
 	#  TC_OBJECT classDesc newHandle classdata[] // data for each class
@@ -472,10 +483,7 @@ sub get_newObject {
 	}
 
 	$e->{_state}="classdata[]";
-	foreach (@{$classDesc->{fields}}) {
-		$e->{$_->{name}} = get_value($_->{type});
-	}
-	#$e->{values} = get_fields_values($e->{_classDesc});
+	get_fields_values($e->{_classDesc},$e);
 	delete $e->{_state};
 
 	return $e;
