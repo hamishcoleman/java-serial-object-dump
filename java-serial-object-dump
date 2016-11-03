@@ -843,14 +843,22 @@ while (!$fh->eof()) {
     # get packet length
     my $length = read_length($fh);
 
-    if ($length == 0x504f5354) {
+    if ($length == 0x504f5354 || $length == 0x48545450) {
             # "POST" == 0x504f5354
+            # "HTTP" == 0x48545450
             # skip the HTTP header..
             while(<$fh>) {
                     chomp; s/\r//g;
                     last if (m/^$/);
             }
-            $length = read_length($fh);
+
+            if ($length == 0x504f5354) {
+                # only the POST side of the protocol has counted buffers ?!
+                $length = read_length($fh);
+            } else {
+                # make a guess at the biggest size for the reply..
+                $length = 65536;
+            }
     }
     $db->{packet}{length} = $length;
 
