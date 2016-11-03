@@ -645,7 +645,14 @@ sub show_class($) {
 	# FIXME - encoded class names
 
 	print "// handle ",$class->{_handle},"\n";
-	print "class ",$class->{_className}," {\n";
+	print "class ",$class->{_className}," ";
+        if ($class->{_superClassDesc}) {
+            print "extends ",$class->{_superClassDesc}->{_className}," ";
+        }
+        if ($class->{_classDescFlags} & 0x2) {
+            print "implements Serializable ";
+        }
+	print "{\n";
 	foreach (@{$class->{fields}}) {
 		my $type;
 		my $name;
@@ -699,14 +706,14 @@ sub show_object($$) {
 		die "Not an object";
 	}
 	return if $object->{_seen};
-	print "object ",$object->{_classDesc}{_className}," { //",$object->{_handle},"\n";
+	print "object ",$object->{_classDesc}{_className}," { // ",$object->{_handle},"\n";
 	print " "x($depth+1);
-	foreach (keys %{$object}) {
+	foreach (sort keys %{$object}) {
 		next if (m/^_/); # skip metadata
 		print $_," = ";
 		show_thing($depth+1,$object->{$_});
 	}
-	print "}\n";
+	print "\b}\n";
 	print " "x($depth);
 	$object->{_seen}++;
 }
