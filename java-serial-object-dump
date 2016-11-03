@@ -165,7 +165,7 @@ my $baseWireHandle = 0x7e0000;
 # global!
 my $db;
 my $blob;
-my $next_handle = $baseWireHandle;
+my $next_handle;
 
 sub handle_get($) {
 	my ($handleraw) = @_;
@@ -819,31 +819,39 @@ $SIG{ __DIE__ } = sub { print Dumper($db); Carp::confess( @_ ) };
 
 my $fh = FileHandle->new($ARGV[0]);
 
-# get packet length
-my $length = read_length($fh);
+while (!$fh->eof()) {
+    $db = {};
+    $next_handle = $baseWireHandle;
 
-if ($length == 0x504f5354) {
-	# "POST" == 0x504f5354
-	# skip the HTTP header..
-	while(<$fh>) {
-		chomp; s/\r//g;
-		last if (m/^$/);
-	}
-	$length = read_length($fh);
+    print "\n// Next packet\n\n";
+
+    # get packet length
+    my $length = read_length($fh);
+
+    if ($length == 0x504f5354) {
+            # "POST" == 0x504f5354
+            # skip the HTTP header..
+            while(<$fh>) {
+                    chomp; s/\r//g;
+                    last if (m/^$/);
+            }
+            $length = read_length($fh);
+    }
+    $db->{packet}{length} = $length;
+
+    # read in the packet
+    $fh->read(my $buf,$db->{packet}{length});
+    $db->{blob}{packet} = Blob->new($buf);
+    $blob = $db->{blob}{packet};
+
+    get_stream();
+
+    show_classes();
+    show_things();
+
+    print "\nDEBUG Dump Database:\n",Dumper($db);
 }
-$db->{packet}{length} = $length;
 
-# read in the packet
-$fh->read(my $buf,$db->{packet}{length});
-$db->{blob}{packet} = Blob->new($buf);
-$blob = $db->{blob}{packet};
-
-get_stream();
-
-show_classes();
-show_things();
-
-print Dumper($db);
 __END__
 
 
